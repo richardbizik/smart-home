@@ -10,3 +10,11 @@ Contains http server that provides api over 433MHz transmitter, ultrasound dista
 Based on TTGO T-Display ESP32 CP2104
 Serves as a clock, sleep training alarm, temperature and humidity sensor using built in oled display.
 Uses RGB led for signaling resting time periods.
+
+## mobile\_app
+I use it to control 433MHz devices in my home as well monitor status of sensors.
+App has a persistent service running in the background that enables to open gates and garage when I am coming home 
+automatically.
+
+## Connecting it together
+All these projects are connected together using (node red)[https://github.com/node-red/node-red]
