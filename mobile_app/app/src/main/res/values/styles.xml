@@ -1,0 +1,24 @@
+<resources>
+    <!-- Base application theme. -->
+    <style name="AppTheme" parent="Theme.MaterialComponents.Light.DarkActionBar">
+        <!-- Customize your theme here. -->
+        <item name="colorPrimary">@color/colorPrimaryDark</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+        <item name="colorAccent">@color/colorAccent</item>
+        <item name="android:windowBackground">@color/colorBackground</item>
+        <item name="android:textColor">@color/colorPrimary</item>
+        <item name="actionOverflowMenuStyle">@style/popMenuStyle</item>
+<!--        <item name="android:layout_marginLeft">5dp</item>-->
+<!--        <item name="android:layout_marginRight">5dp</item>-->
+<!--        <item name="android:toolbarStyle">@style/Toolbar</item>-->
+    </style>
+
+    <style name="MainLayout">
+        <item name="android:layout_marginRight">5dp</item>
+        <item name="android:layout_marginLeft">5dp</item>
+    </style>
+    <style name="popMenuStyle" parent="Widget.AppCompat.PopupMenu.Overflow">
+        <item name="android:popupBackground">@color/colorBackground</item>
+    </style>
+
+</resources>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorBackground">#525252</color>
+    <color name="colorPrimary">#909090</color>
+    <color name="colorTextBright">#E4E4E4</color>
+    <color name="colorTempLine">#FF4848</color>
+    <color name="colorTempCircle">#C40000</color>
+    <color name="colorHumLine">#48A0FF</color>
+    <color name="colorHumCircle">#0060C8</color>
+    <color name="colorPrimaryDark">#353535</color>
+    <color name="colorAccent">#03A8DA</color>
+    <color name="redAccent">#723B3B</color>
+
+</resources>

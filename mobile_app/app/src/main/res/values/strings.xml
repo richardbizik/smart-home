@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">SmartHome</string>
+    <string name="settings_name">Nastavenia</string>
+    <string name="add_device_button">Pridať zariadenie</string>
+    <string name="devices">Zariadenia</string>
+    <string name="bedroom">SPÁLŇA</string>
+
+</resources>

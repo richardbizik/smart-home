@@ -1,0 +1,8 @@
+.pio
+.clang_complete
+.gcc-flags.json
+.ccls
+.ccls-cache
+src/secret.h
+schematics/transmitter_pcb/transmitter_pcb-backups
+lib/
