@@ -17,4 +17,4 @@ App has a persistent service running in the background that enables to open gate
 automatically.
 
 ## Connecting it together
-All these projects are connected together using (node red)[https://github.com/node-red/node-red]
+All these projects are connected together using [node red](https://github.com/node-red/node-red)
