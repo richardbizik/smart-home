@@ -36,7 +36,18 @@ import sk.coroid.smarthome.settings.SettingsActivity;
 
 public class MainActivity extends AppCompatActivity {
     private static final int MY_PERMISSION_REQUEST_CODE = 7192;
+    private static final int BACKGROUND_PERMISSION_REQUEST_CODE = 7193;
     private static final int PLAY_SERVICE_REQUEST = 300193;
+
+    // Foreground permissions requested together in the first dialog. Background
+    // location must be requested separately, AFTER these are granted (Android 11+).
+    private static final String[] FOREGROUND_PERMISSIONS = new String[]{
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACCESS_NETWORK_STATE,
+            Manifest.permission.FOREGROUND_SERVICE,
+            Manifest.permission.BLUETOOTH_CONNECT
+    };
     private GateOpeningManager gateOpeningManager;
     private SmartHomeClient smartHomeClient;
 
@@ -50,27 +61,40 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         smartHomeClient = new SmartHomeClient(this);
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                || ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                || ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED
-                || ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED
-                || ActivityCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE) != PackageManager.PERMISSION_GRANTED
-                || ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_NETWORK_STATE) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{
-                    "android.permission.ACCESS_FINE_LOCATION",
-                    "android.permission.ACCESS_COARSE_LOCATION",
-                    "android.permission.ACCESS_NETWORK_STATE",
-                    "android.permission.ACCESS_BACKGROUND_LOCATION",
-                    "android.permission.FOREGROUND_SERVICE",
-                    "android.permission.BLUETOOTH"
-            }, MY_PERMISSION_REQUEST_CODE);
+        if (!hasForegroundPermissions()) {
+            ActivityCompat.requestPermissions(this, FOREGROUND_PERMISSIONS, MY_PERMISSION_REQUEST_CODE);
         } else {
-            if (checkPlayService()) {
-                Intent intent = new Intent(this, GateOpeningManager.class);
-                startService(intent);
-            }
-            initActivity();
+            onForegroundPermissionsReady();
         }
+    }
+
+    private boolean hasForegroundPermissions() {
+        for (String permission : FOREGROUND_PERMISSIONS) {
+            if (ActivityCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Foreground permissions are in place: request background location, then start up. */
+    private void onForegroundPermissionsReady() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION},
+                    BACKGROUND_PERMISSION_REQUEST_CODE);
+            return;
+        }
+        startUp();
+    }
+
+    private void startUp() {
+        if (checkPlayService()) {
+            Intent intent = new Intent(this, GateOpeningManager.class);
+            startService(intent);
+        }
+        initActivity();
     }
 
     @Override
@@ -110,9 +134,17 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(MY_PERMISSION_REQUEST_CODE, permissions, grantResults);
-        if (requestCode == 1) {
-            initActivity();
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == MY_PERMISSION_REQUEST_CODE) {
+            if (hasForegroundPermissions()) {
+                onForegroundPermissionsReady();
+            } else {
+                Toast.makeText(this, "Location & Bluetooth permissions are required", Toast.LENGTH_LONG).show();
+            }
+        } else if (requestCode == BACKGROUND_PERMISSION_REQUEST_CODE) {
+            // Start up regardless: background location is optional for manual use,
+            // it only enables auto-open while the app is backgrounded.
+            startUp();
         }
     }
 

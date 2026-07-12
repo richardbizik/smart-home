@@ -63,7 +63,7 @@ public class GateOpeningManager extends Service implements LocationListener {
     private LocationManager locationManager;
     private String connectedBluetoothDevice = null;
     private long currentInterval = Constants.BASE_OPEN_DISTANCE_INTERVAL_SMALL;
-    private String currentRadius = null;
+    private String currentRadius = "";
     NotificationManager notificationManager;
     private SmartHomeClient smartHomeClient;
     private String garageStatus = "";
@@ -152,11 +152,29 @@ public class GateOpeningManager extends Service implements LocationListener {
         }
         return notificationBuilder.setOngoing(true)
                 .setContentTitle(title)
-                .setContentText(garageStatus + "\n" + currentRadius)
+                .setContentText(buildNotificationBody())
                 .setPriority(NotificationManager.IMPORTANCE_MIN)
                 .setCategory(Notification.CATEGORY_SERVICE)
                 .setSmallIcon(R.drawable.ic_house)
                 .build();
+    }
+
+    /**
+     * Joins the garage status and current perimeter into the notification body,
+     * skipping any part that is empty so we never render a stray blank line or "null".
+     */
+    private String buildNotificationBody() {
+        StringBuilder sb = new StringBuilder();
+        if (garageStatus != null && !garageStatus.isEmpty()) {
+            sb.append(garageStatus);
+        }
+        if (currentRadius != null && !currentRadius.isEmpty()) {
+            if (sb.length() > 0) {
+                sb.append("\n");
+            }
+            sb.append(currentRadius);
+        }
+        return sb.toString();
     }
 
     private void handleDeviceSettingsChanged() {
@@ -169,19 +187,7 @@ public class GateOpeningManager extends Service implements LocationListener {
         }
         this.locationChangeListeners.add(locationChangeListener);
 
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-        Location lastKnownLocationGPS = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-        Location lastKnownLocationGSM = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-        Location lastKnownLocation = null;
-        if (lastKnownLocationGPS != null && lastKnownLocationGSM != null) {
-            lastKnownLocation = lastKnownLocationGPS.getTime() + 30 * 1000 < lastKnownLocationGSM.getTime() ? lastKnownLocationGSM : lastKnownLocationGPS;
-        } else if (lastKnownLocationGPS != null) {
-            lastKnownLocation = lastKnownLocationGPS;
-        } else if (lastKnownLocationGSM != null) {
-            lastKnownLocation = lastKnownLocationGSM;
-        }
+        Location lastKnownLocation = getBestLastKnownLocation();
         if (lastKnownLocation != null) {
             onLocationChanged(lastKnownLocation);
         }
@@ -221,7 +227,7 @@ public class GateOpeningManager extends Service implements LocationListener {
     private void handleBluetoothActions(String action, String address) {
         if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
             Device device = settingsStorageManager.getDevice(address);
-            if (device.isEnabled()) {
+            if (device != null && device.isEnabled()) {
                 Log.d(TAG, "BT device connected: " + address);
                 connectedBluetoothDevice = address;
                 handleDeviceConnected();
@@ -237,29 +243,45 @@ public class GateOpeningManager extends Service implements LocationListener {
         }
     }
 
-    private void handleDeviceDisconnected() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            return;
+    /**
+     * Returns the freshest last-known location across GPS and network providers,
+     * or {@code null} if no permission or no fix is available. Null-safe for every
+     * combination of providers being unavailable.
+     */
+    private Location getBestLastKnownLocation() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return null;
         }
-        Location lastKnownLocationGPS = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-        Location lastKnownLocationGSM = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-        Location lastKnownLocation = lastKnownLocationGPS.getTime() + 30 * 1000 < lastKnownLocationGSM.getTime() ? lastKnownLocationGSM : lastKnownLocationGPS;
-        if (lastKnownLocation != null
-                && lastKnownLocation.getTime() + 10 * 1000 < System.currentTimeMillis() // check if lastKnownLocation is fresh
+        Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+        Location gsm = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+        if (gps != null && gsm != null) {
+            return gps.getTime() + 30 * 1000 < gsm.getTime() ? gsm : gps;
+        } else if (gps != null) {
+            return gps;
+        } else if (gsm != null) {
+            return gsm;
+        }
+        return null;
+    }
+
+    /** True when the fix is recent enough to act on (within the freshness window). */
+    private boolean isFresh(Location location) {
+        return location != null
+                && System.currentTimeMillis() - location.getTime() < Constants.LOCATION_FRESHNESS_WINDOW;
+    }
+
+    private void handleDeviceDisconnected() {
+        Location lastKnownLocation = getBestLastKnownLocation();
+        if (isFresh(lastKnownLocation)
                 && lastKnownLocation.distanceTo(BASE_LOCATION) < Constants.BASE_OPEN_DISTANCE_SMALL) {
             openGates(BluetoothDeviceAction.LEFT_VEHICLE);
         }
     }
 
     private void handleDeviceConnected() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-        Location lastKnownLocationGPS = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-        Location lastKnownLocationGSM = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-        Location lastKnownLocation = lastKnownLocationGPS.getTime() + 30 * 1000 < lastKnownLocationGSM.getTime() ? lastKnownLocationGSM : lastKnownLocationGPS;
-        if (lastKnownLocation != null
-                && lastKnownLocation.getTime() + 10 * 1000 < System.currentTimeMillis() // check if lastKnownLocation is fresh
+        Location lastKnownLocation = getBestLastKnownLocation();
+        if (isFresh(lastKnownLocation)
                 && lastKnownLocation.distanceTo(BASE_LOCATION) < Constants.BASE_OPEN_DISTANCE_SMALL) {
             openGates(BluetoothDeviceAction.ENTERED_VEHICLE);
         }
@@ -381,17 +403,17 @@ public class GateOpeningManager extends Service implements LocationListener {
     }
 
     public void setGarageStatus(String s, boolean updateNotification) {
-        int oldStatus = this.previousStatus;
-        if (this.garageStatus.contains("open")){
-            this.previousStatus = 1;
-        } else {
-            this.previousStatus = 2;
-        }
-        if (oldStatus == this.previousStatus){
+        int newStatus = (s != null && s.contains("open")) ? 1 : 2;
+        int currentStatus = (this.garageStatus != null && this.garageStatus.contains("open")) ? 1 : 2;
+        if (newStatus == currentStatus) {
+            // no open<->closed transition, nothing to announce
             return;
         }
+        // remember the state we are transitioning from so getNotification() can
+        // vibrate/sound only on a genuine closed -> open change
+        this.previousStatus = currentStatus;
         this.garageStatus = s;
-        if (updateNotification){
+        if (updateNotification) {
             changeNotification(Constants.NOTIFICATION_RUNNING_MESSAGE);
         }
     }

@@ -7,6 +7,9 @@ public interface Constants {
     int NOTIFICATION_STATE_TRANSFER_DELAY = 100; //ms
     String NOTIFICATION_RUNNING_MESSAGE = "SmartHome is running";
 
+    // A last-known fix older than this is considered stale and won't trigger auto-open
+    long LOCATION_FRESHNESS_WINDOW = 2 * 60 * 1000; //ms
+
     float MAX_ALLOWED_DISTANCE = 200f; //distance from which confirmation popup shows
     float BASE_OPEN_DISTANCE_SMALL = 60f; //open gate
     float BASE_OPEN_DISTANCE_MEDIUM = 600f;
