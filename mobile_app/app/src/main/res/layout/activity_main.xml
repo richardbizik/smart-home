@@ -13,7 +13,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
-        android:paddingTop="30dp"
+        android:paddingTop="70dp"
         tools:layout_editor_absoluteX="5dp">
 
         <ScrollView

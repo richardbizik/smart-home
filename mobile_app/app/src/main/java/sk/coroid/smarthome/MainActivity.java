@@ -276,7 +276,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void sendMobileCommand(String message) {
         try {
-            gateOpeningManager.sendHttpCommand(message);
+            gateOpeningManager.sendHttpCommand(message, Constants.MAX_COMMAND_RETRY);
         } catch (Exception e) {
             Log.e("MainActivity", e.getMessage(), e);
         }

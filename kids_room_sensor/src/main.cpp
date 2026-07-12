@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <DHT.h> //https://github.com/adafruit/DHT-sensor-library
-#include <esp_adc_cal.h>
 #include <HTTPClient.h>
 #include <NTPClient.h> //https://github.com/taranais/NTPClient
 #include <SPI.h>
@@ -10,6 +9,7 @@
 #include <WiFiUdp.h>
 #include <analogWrite.h>
 #include <driver/adc.h>
+#include <esp_adc_cal.h>
 #include <secret.h>
 #include <timezones.h>
 
@@ -152,9 +152,15 @@ void setSleep() {
   analogWrite(PIN_BLUE, 0);
 }
 
-void setWakeup() {
+void setWarn(int i) {
   analogWrite(PIN_RED, 0);
-  analogWrite(PIN_GREEN, 255);
+  analogWrite(PIN_GREEN, 0);
+  analogWrite(PIN_BLUE, i);
+}
+
+void setWakeup(int i) {
+  analogWrite(PIN_RED, 0);
+  analogWrite(PIN_GREEN, i);
   analogWrite(PIN_BLUE, 0);
 }
 
@@ -268,18 +274,22 @@ void loop() {
   Serial.printf("Time now %ld\n", zdt);
   Serial.printf("Hour now %d\n", hour(zdt));
 
-  if (hour(zdt) == 19 && minute(zdt) > 30) {
-    setSleep();
-  } else if (hour(zdt) > 19 || hour(zdt) < 7) {
-    setSleep();
-  } else if (hour(zdt) == 7) {
-    setWakeup();
-  } else if (hour(zdt) >= 12 && hour(zdt) < 13) {
-    setSleep();
-  } else if (hour(zdt) == 13) {
-    setWakeup();
-  } else {
-    setOff();
+  for (int i = 0; i < 255; i++) {
+    if (hour(zdt) == 18 && minute(zdt) >= 45) {
+      setWarn(i);
+    } else if (hour(zdt) == 19 && minute(zdt) >= 0) {
+      setSleep();
+    } else if (hour(zdt) == 6 && minute(zdt) >= 45) {
+      setWarn(i);
+    } else if (hour(zdt) >= 19 || hour(zdt) <= 6) {
+      setSleep();
+    } else if (hour(zdt) == 7) {
+      setWakeup(i);
+    } else if (hour(zdt) == 12) {
+      setWarn(i);
+    } else {
+      setOff();
+    }
+    delay(1000 / 255);
   }
-  delay(1000);
 }

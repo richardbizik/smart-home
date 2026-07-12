@@ -164,6 +164,9 @@ public class GateOpeningManager extends Service implements LocationListener {
     }
 
     public void registerLocationChangeListener(LocationChangeListener locationChangeListener) {
+        if (this.locationChangeListeners.size() == 1){
+            this.locationChangeListeners = new ArrayList<>();
+        }
         this.locationChangeListeners.add(locationChangeListener);
 
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
@@ -306,35 +309,29 @@ public class GateOpeningManager extends Service implements LocationListener {
         return isServiceRunning;
     }
 
-    private int commandRetry = 0;
-    private String commandMessage = null;
-
     public void sendCommand(String message) {
         if (!canSendCommand()) {
-            commandResult(Boolean.FALSE);
+            commandResult(Boolean.FALSE, message, 0);
             return;
         }
-        commandRetry = 0;
-        commandMessage = message;
-        sendHttpCommand(message);
+        sendHttpCommand(message,Constants.MAX_COMMAND_RETRY);
     }
 
-    public void sendHttpCommand(String message) {
-        Log.d(TAG, "sending Http command: " + message + " iteration: " + commandRetry);
-        commandRetry++;
+    public void sendHttpCommand(String message, int retry) {
+        Log.d(TAG, "sending Http command: " + message + " retries: " + retry);
         smartHomeClient.sendCommand(message, aBoolean -> {
-            commandResult(aBoolean);
+            commandResult(aBoolean, message, retry);
             return null;
         });
     }
 
-    private void commandResult(Boolean result) {
-        if (Boolean.FALSE.equals(result) && commandRetry < Constants.MAX_COMMAND_RETRY) {
+    private void commandResult(Boolean result, String message, int retry) {
+        if (Boolean.FALSE.equals(result) && retry > 0) {
             final Handler h = new Handler();
             h.postDelayed(() -> {
-                sendHttpCommand(commandMessage);
+                sendHttpCommand(message, retry-1);
             }, Constants.COMMAND_WAIT);
-        } else if (Boolean.FALSE.equals(result) && commandRetry == Constants.MAX_COMMAND_RETRY) {
+        } else if (Boolean.FALSE.equals(result) && retry <= 0) {
             notifyFail();
         } else if (Boolean.TRUE.equals(result)) {
             notifySuccess();
@@ -384,10 +381,14 @@ public class GateOpeningManager extends Service implements LocationListener {
     }
 
     public void setGarageStatus(String s, boolean updateNotification) {
+        int oldStatus = this.previousStatus;
         if (this.garageStatus.contains("open")){
             this.previousStatus = 1;
         } else {
             this.previousStatus = 2;
+        }
+        if (oldStatus == this.previousStatus){
+            return;
         }
         this.garageStatus = s;
         if (updateNotification){
@@ -489,7 +490,7 @@ public class GateOpeningManager extends Service implements LocationListener {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             return false;
         }
-        lastKnownLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+        lastKnownLocation = locationManager.getLastKnownLocation(LocationManager.FUSED_PROVIDER);
         return lastKnownLocation != null && BASE_LOCATION.distanceTo(lastKnownLocation) < Constants.MAX_ALLOWED_DISTANCE;
     }
 

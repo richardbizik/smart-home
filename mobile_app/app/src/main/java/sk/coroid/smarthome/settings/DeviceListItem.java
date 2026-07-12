@@ -35,7 +35,7 @@ public class DeviceListItem extends RelativeLayout {
         LinearLayout vertical = new LinearLayout(context);
         vertical.setOrientation(LinearLayout.VERTICAL);
         mText1 = new TextView(this.getContext());
-        mText1.setTextSize(30);
+        mText1.setTextSize(20);
         mText1.setText(device.getDeviceName());
 //        mText1.setLayoutParams(new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         mText2 = new TextView(this.getContext());

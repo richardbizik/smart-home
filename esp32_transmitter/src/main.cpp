@@ -1,20 +1,19 @@
 #include <Arduino.h>
-#include <distance.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <distance.h>
 #include <esp_http_server.h>
+#include <presence.h>
+#include <secret.h>
 #include <server.h>
 #include <string>
 #include <sys/param.h>
 #include <transmit.h>
-#include <secret.h>
-#include <presence.h>
 
 #define LED 2
 WiFiServer server(80);
 
 void setup() {
-  // put your setup code here, to run once:
   Serial.begin(115200);
   pinMode(LED, OUTPUT);
 
@@ -30,8 +29,8 @@ void setup() {
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 
-	setupDistanceMeter();
-	setupPIR();
+  setupDistanceMeter();
+  setupPIR();
   start_webserver();
 }
 
@@ -46,7 +45,12 @@ void loop() {
   } else if (network_connected) {
     digitalWrite(LED, LOW);
     network_connected = false;
+    WiFi.begin(network_ssid, network_password);
+    while (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Waiting for connection...");
+      delay(300);
+    }
   }
-	performMeasurement();
-	delay(1000);
+  performMeasurement();
+  delay(1000);
 }

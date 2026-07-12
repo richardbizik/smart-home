@@ -1,10 +1,10 @@
 package sk.coroid.smarthome;
 
 public interface Constants {
-    int MAX_COMMAND_RETRY = 5;
+    int MAX_COMMAND_RETRY = 2;
     int COMMAND_WAIT = 500; //ms
 
-    int NOTIFICATION_STATE_TRANSFER_DELAY = 30000; //ms
+    int NOTIFICATION_STATE_TRANSFER_DELAY = 100; //ms
     String NOTIFICATION_RUNNING_MESSAGE = "SmartHome is running";
 
     float MAX_ALLOWED_DISTANCE = 200f; //distance from which confirmation popup shows
