@@ -103,6 +103,9 @@ public class MainActivity extends AppCompatActivity {
         Intent intent = new Intent(this, GateOpeningManager.class);
         bindService(intent, connection, BIND_IMPORTANT);
         isVisible = true;
+        if (!Constants.GARAGE_STATUS_ENABLED) {
+            return;
+        }
         Handler handler = new Handler();
         handler.post(new Runnable() {
             @Override
@@ -185,7 +188,11 @@ public class MainActivity extends AppCompatActivity {
             gateOpeningManager = service1.getService();
 //            Toast.makeText(MainActivity.this, "MQTTManager is connected", Toast.LENGTH_SHORT).show();
             gateOpeningManager.requestLocationUpdate();
-            gateOpeningManager.registerLocationChangeListener(locationChangeListener);Handler handler = new Handler();
+            gateOpeningManager.registerLocationChangeListener(locationChangeListener);
+            if (!Constants.GARAGE_STATUS_ENABLED) {
+                return;
+            }
+            Handler handler = new Handler();
             handler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -210,6 +217,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void initActivity() {
         setContentView(R.layout.activity_main);
+        if (!Constants.GARAGE_STATUS_ENABLED) {
+            findViewById(R.id.garageInfo).setVisibility(View.GONE);
+        }
         recyclerView = findViewById(R.id.recyclerView);
         recyclerView.addOnItemTouchListener(new RecyclerView.SimpleOnItemTouchListener() {
             @Override

@@ -7,6 +7,10 @@ public interface Constants {
     int NOTIFICATION_STATE_TRANSFER_DELAY = 100; //ms
     String NOTIFICATION_RUNNING_MESSAGE = "SmartHome is running";
 
+    // Garage door sensor polling (status text + "garage opened" vibration).
+    // Off until the sensor is actually mounted in the garage.
+    boolean GARAGE_STATUS_ENABLED = false;
+
     // A last-known fix older than this is considered stale and won't trigger auto-open
     long LOCATION_FRESHNESS_WINDOW = 2 * 60 * 1000; //ms
 

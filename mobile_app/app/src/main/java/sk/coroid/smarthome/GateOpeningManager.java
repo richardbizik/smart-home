@@ -5,7 +5,11 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.app.PendingIntent;
+import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -14,19 +18,25 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.location.Location;
-import android.location.LocationListener;
-import android.location.LocationManager;
 import android.media.MediaPlayer;
-import android.media.RingtoneManager;
-import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
-import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.Geofence;
+import com.google.android.gms.location.GeofencingClient;
+import com.google.android.gms.location.GeofencingRequest;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
 import android.util.ArraySet;
 import android.util.Log;
 import android.widget.Toast;
@@ -46,28 +56,43 @@ import sk.coroid.smarthome.settings.Device;
 import sk.coroid.smarthome.settings.SettingsActivity;
 import sk.coroid.smarthome.settings.storage.SettingsStorageManager;
 
-public class GateOpeningManager extends Service implements LocationListener {
+public class GateOpeningManager extends Service {
 
     private static final String NOTIFICATION_CHANNEL_ID = "smart_home.permanence";
 
     private static final String TAG = GateOpeningManager.class.getSimpleName();
     public static final int NOTIFICATION_ID = 2;
 
+    public static final String ACTION_GEOFENCE_TRANSITION = "sk.coroid.smarthome.GEOFENCE_TRANSITION";
+    public static final String EXTRA_GEOFENCE_TRANSITION = "geofence_transition";
+    private static final String HOME_GEOFENCE_ID = "home";
+    /** Ignore an identical auto-open action fired again within this window (double-fire guard). */
+    private static final long OPEN_GATES_DEBOUNCE = 5 * 1000;
+
     private static Location BASE_LOCATION = new Location("");
 
-    private Location lastKnownLocation = null;
+    /** Previous fix, owned exclusively by the perimeter state machine in onLocationChanged. */
+    private Location previousLocation = null;
+    /** Latest fix, refreshed by the fused callback; read by canSendCommand/getBestLastKnownLocation. */
+    private Location cachedLocation = null;
 
     private boolean isServiceRunning;
     private final IBinder serviceBinder = new RunServiceBinder();
 
-    private LocationManager locationManager;
+    private FusedLocationProviderClient fusedLocationClient;
+    private GeofencingClient geofencingClient;
+    private LocationCallback locationCallback;
+    private PendingIntent geofencePendingIntent;
+
+    private BluetoothDeviceAction lastOpenAction = null;
+    private long lastOpenTime = 0;
+
     private String connectedBluetoothDevice = null;
     private long currentInterval = Constants.BASE_OPEN_DISTANCE_INTERVAL_SMALL;
     private String currentRadius = "";
     NotificationManager notificationManager;
     private SmartHomeClient smartHomeClient;
     private String garageStatus = "";
-    private int previousStatus = 0; // 1 - open, 2 - closed
 
     SettingsStorageManager settingsStorageManager;
 
@@ -113,7 +138,20 @@ public class GateOpeningManager extends Service implements LocationListener {
         filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
         registerReceiver(bluetoothReceiver, filter);
 
-        locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        geofencingClient = LocationServices.getGeofencingClient(this);
+        locationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(@NonNull LocationResult result) {
+                Location loc = result.getLastLocation();
+                if (loc != null) {
+                    onLocationChanged(loc);
+                }
+            }
+        };
+        seedLastLocation();          // async getLastLocation() to warm cachedLocation
+        restoreConnectedBluetooth(); // restore BT state so the geofence backup fires after a kill
+        registerHomeGeofence();      // backup trigger that survives backgrounding/kill
         startService();
     }
 
@@ -142,14 +180,9 @@ public class GateOpeningManager extends Service implements LocationListener {
     }
 
     private Notification getNotification(String title) {
+        // No vibration here: this is rebuilt on every location fix / geofence event, so any
+        // side effect here fires constantly. The garage-open buzz lives in setGarageStatus().
         NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID);
-        // vibration and sound only if previous status was closed
-        if (garageStatus.contains("open") && previousStatus==2) {
-            Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
-            v.vibrate(VibrationEffect.createWaveform(new long[]{1000,350}, -1));
-            Uri alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
-            notificationBuilder.setSound(alarmSound);
-        }
         return notificationBuilder.setOngoing(true)
                 .setContentTitle(title)
                 .setContentText(buildNotificationBody())
@@ -199,6 +232,15 @@ public class GateOpeningManager extends Service implements LocationListener {
 
     private void openGates(BluetoothDeviceAction action) {
         if (connectedBluetoothDevice != null) {
+            // Debounce: the fused perimeter machine and the geofence can both fire the same
+            // action on arrival/departure while the app is alive. Ignore an identical repeat.
+            long now = System.currentTimeMillis();
+            if (action == lastOpenAction && now - lastOpenTime < OPEN_GATES_DEBOUNCE) {
+                Log.d(TAG, "Debounced duplicate openGates action: " + action.name());
+                return;
+            }
+            lastOpenAction = action;
+            lastOpenTime = now;
             try {
                 Log.println(Log.DEBUG, TAG, "----------------OPENING-----------------");
                 String command = getCommandForDevice(connectedBluetoothDevice, action);
@@ -239,30 +281,83 @@ public class GateOpeningManager extends Service implements LocationListener {
                 handleDeviceDisconnected();
                 connectedBluetoothDevice = null;
             }
-            locationManager.removeUpdates(this);
+            fusedLocationClient.removeLocationUpdates(locationCallback);
         }
     }
 
     /**
-     * Returns the freshest last-known location across GPS and network providers,
-     * or {@code null} if no permission or no fix is available. Null-safe for every
-     * combination of providers being unavailable.
+     * On (re)create the ACL_CONNECTED broadcast has already fired for any device that was
+     * connected before the service started, so {@link #connectedBluetoothDevice} is null.
+     * Query the currently-connected classic audio profiles (car head units) and restore it,
+     * so a geofence-triggered service after an app kill still knows it is "in the car".
+     */
+    private void restoreConnectedBluetooth() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bluetoothManager == null) {
+            return;
+        }
+        BluetoothAdapter adapter = bluetoothManager.getAdapter();
+        if (adapter == null || !adapter.isEnabled()) {
+            return;
+        }
+        BluetoothProfile.ServiceListener listener = new BluetoothProfile.ServiceListener() {
+            @Override
+            public void onServiceConnected(int profile, BluetoothProfile proxy) {
+                try {
+                    for (BluetoothDevice device : proxy.getConnectedDevices()) {
+                        Device configured = settingsStorageManager.getDevice(device.getAddress());
+                        if (configured != null && configured.isEnabled()) {
+                            connectedBluetoothDevice = device.getAddress();
+                            requestLocationUpdates(Constants.BASE_OPEN_DISTANCE_INTERVAL_SMALL);
+                            break;
+                        }
+                    }
+                } catch (SecurityException ignored) {
+                    // permission revoked between the check and the callback
+                } finally {
+                    adapter.closeProfileProxy(profile, proxy);
+                }
+            }
+
+            @Override
+            public void onServiceDisconnected(int profile) {
+            }
+        };
+        adapter.getProfileProxy(this, listener, BluetoothProfile.A2DP);
+        adapter.getProfileProxy(this, listener, BluetoothProfile.HEADSET);
+    }
+
+    /** True when fine or coarse location permission is granted. */
+    private boolean hasLocationPermission() {
+        return ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * Returns the latest cached fix (kept fresh by the fused location callback),
+     * or {@code null} if no permission or no fix has arrived yet.
      */
     private Location getBestLastKnownLocation() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasLocationPermission()) {
             return null;
         }
-        Location gps = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-        Location gsm = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-        if (gps != null && gsm != null) {
-            return gps.getTime() + 30 * 1000 < gsm.getTime() ? gsm : gps;
-        } else if (gps != null) {
-            return gps;
-        } else if (gsm != null) {
-            return gsm;
+        return cachedLocation;
+    }
+
+    /** Warms {@link #cachedLocation} with the last known fix on service start. */
+    private void seedLastLocation() {
+        if (!hasLocationPermission()) {
+            return;
         }
-        return null;
+        fusedLocationClient.getLastLocation()
+                .addOnSuccessListener(loc -> {
+                    if (loc != null && cachedLocation == null) {
+                        cachedLocation = loc;
+                    }
+                });
     }
 
     /** True when the fix is recent enough to act on (within the freshness window). */
@@ -292,7 +387,27 @@ public class GateOpeningManager extends Service implements LocationListener {
         if (Log.isLoggable(TAG, Log.VERBOSE)) {
             Log.println(Log.DEBUG, TAG, "Starting service");
         }
+        if (intent != null && ACTION_GEOFENCE_TRANSITION.equals(intent.getAction())) {
+            handleGeofenceTransition(intent.getIntExtra(EXTRA_GEOFENCE_TRANSITION, -1));
+        }
         return Service.START_STICKY;
+    }
+
+    private void handleGeofenceTransition(int transition) {
+        if (transition == Geofence.GEOFENCE_TRANSITION_ENTER) {
+            currentRadius = "Inside base";
+            if (connectedBluetoothDevice != null) {
+                openGates(BluetoothDeviceAction.ENTERED_BASE);
+            }
+        } else if (transition == Geofence.GEOFENCE_TRANSITION_EXIT) {
+            currentRadius = "Left small perimeter";
+            if (connectedBluetoothDevice != null) {
+                openGates(BluetoothDeviceAction.LEAVING_BASE);
+            }
+        } else {
+            return;
+        }
+        changeNotification(Constants.NOTIFICATION_RUNNING_MESSAGE);
     }
 
     @Override
@@ -308,6 +423,12 @@ public class GateOpeningManager extends Service implements LocationListener {
         super.onDestroy();
         if (Log.isLoggable(TAG, Log.VERBOSE)) {
             Log.v(TAG, "Destroying service");
+        }
+        if (fusedLocationClient != null) {
+            fusedLocationClient.removeLocationUpdates(locationCallback);
+        }
+        if (geofencingClient != null && geofencePendingIntent != null) {
+            geofencingClient.removeGeofences(geofencePendingIntent);
         }
     }
 
@@ -382,49 +503,64 @@ public class GateOpeningManager extends Service implements LocationListener {
 
     public void requestLocationUpdate() {
         Log.println(Log.DEBUG, TAG, String.format("Requesting new location update"));
-        if (ActivityCompat.checkSelfPermission(this.getApplicationContext(), Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this.getApplicationContext(), Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this.getApplicationContext(), Manifest.permission.ACCESS_NETWORK_STATE) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasLocationPermission()) {
             return;
         }
-        locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER, this, this.getMainLooper());
+        fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                .addOnSuccessListener(loc -> {
+                    if (loc != null) {
+                        onLocationChanged(loc);
+                    }
+                });
     }
 
     private void requestLocationUpdates(long interval) {
         Log.println(Log.DEBUG, TAG, String.format("Requesting new location updates with interval: %s", interval));
-        if (ActivityCompat.checkSelfPermission(this.getApplicationContext(), Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this.getApplicationContext(), Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && ActivityCompat.checkSelfPermission(this.getApplicationContext(), Manifest.permission.ACCESS_NETWORK_STATE) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasLocationPermission()) {
             return;
         }
         currentInterval = interval;
-        locationManager.removeUpdates(this);
-        locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, interval, 5, this);
+        fusedLocationClient.removeLocationUpdates(locationCallback);
+        LocationRequest request = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, interval)
+                .setMinUpdateDistanceMeters(5)
+                .build();
+        fusedLocationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper());
     }
 
     public void setGarageStatus(String s, boolean updateNotification) {
-        int newStatus = (s != null && s.contains("open")) ? 1 : 2;
-        int currentStatus = (this.garageStatus != null && this.garageStatus.contains("open")) ? 1 : 2;
-        if (newStatus == currentStatus) {
+        // Empty until the first reading after the service (re)starts; that first reading is
+        // not a transition, so an already-open garage must not buzz.
+        boolean statusKnown = this.garageStatus != null && !this.garageStatus.isEmpty();
+        boolean wasOpen = statusKnown && this.garageStatus.contains("open");
+        boolean isOpen = s != null && s.contains("open");
+        this.garageStatus = s;
+        if (statusKnown && isOpen == wasOpen) {
             // no open<->closed transition, nothing to announce
             return;
         }
-        // remember the state we are transitioning from so getNotification() can
-        // vibrate/sound only on a genuine closed -> open change
-        this.previousStatus = currentStatus;
-        this.garageStatus = s;
+        if (statusKnown && isOpen) {
+            // genuine closed -> open change: buzz exactly once, right now
+            vibrateGarageOpened();
+        }
         if (updateNotification) {
             changeNotification(Constants.NOTIFICATION_RUNNING_MESSAGE);
         }
     }
 
-    @Override
-    public void onLocationChanged(@NonNull Location newLocation) {
-        Log.println(Log.DEBUG, TAG, "Received location: " + newLocation.getLatitude() + ", " + newLocation.getLongitude());
-        if (lastKnownLocation == null) {
-            lastKnownLocation = newLocation;
+    private void vibrateGarageOpened() {
+        Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+        if (v != null) {
+            v.vibrate(VibrationEffect.createWaveform(new long[]{1000, 350}, -1));
         }
-        if (lastKnownLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_SMALL
+    }
+
+    private void onLocationChanged(@NonNull Location newLocation) {
+        Log.println(Log.DEBUG, TAG, "Received location: " + newLocation.getLatitude() + ", " + newLocation.getLongitude());
+        cachedLocation = newLocation;
+        if (previousLocation == null) {
+            previousLocation = newLocation;
+        }
+        if (previousLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_SMALL
                 && newLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_SMALL) {
             //if we entered small perimeter
             currentRadius = "Inside base";
@@ -433,19 +569,19 @@ public class GateOpeningManager extends Service implements LocationListener {
                 openGates(BluetoothDeviceAction.ENTERED_BASE);
             }
             requestLocationUpdates(Constants.BASE_OPEN_DISTANCE_INTERVAL_SMALL);
-        } else if (lastKnownLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_LARGE
+        } else if (previousLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_LARGE
                 && newLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_LARGE) {
             //if we left large perimeter
             currentRadius = "Outside of large perimeter";
             changeNotification(Constants.NOTIFICATION_RUNNING_MESSAGE);
             requestLocationUpdates(Constants.BASE_OPEN_DISTANCE_INTERVAL_LARGE);
-        } else if (lastKnownLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_MEDIUM
+        } else if (previousLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_MEDIUM
                 && newLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_MEDIUM) {
             //if we left medium perimeter
             currentRadius = "Left medium perimeter";
             changeNotification(Constants.NOTIFICATION_RUNNING_MESSAGE);
             requestLocationUpdates(Constants.BASE_OPEN_DISTANCE_INTERVAL_MEDIUM);
-        } else if (lastKnownLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_SMALL
+        } else if (previousLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_SMALL
                 && newLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_SMALL) {
             //if we left small perimeter
             currentRadius = "Left small perimeter";
@@ -453,13 +589,13 @@ public class GateOpeningManager extends Service implements LocationListener {
             if (connectedBluetoothDevice != null) {
                 openGates(BluetoothDeviceAction.LEAVING_BASE);
             }
-        } else if (lastKnownLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_MEDIUM
+        } else if (previousLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_MEDIUM
                 && newLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_MEDIUM) {
             //if we entered medium perimeter
             currentRadius = "Entered medium perimeter";
             changeNotification(Constants.NOTIFICATION_RUNNING_MESSAGE);
             requestLocationUpdates(Constants.BASE_OPEN_DISTANCE_INTERVAL_SMALL);
-        } else if (lastKnownLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_LARGE
+        } else if (previousLocation.distanceTo(BASE_LOCATION) >= Constants.BASE_OPEN_DISTANCE_LARGE
                 && newLocation.distanceTo(BASE_LOCATION) <= Constants.BASE_OPEN_DISTANCE_LARGE) {
             //if we entered large perimeter
             currentRadius = "Entered large perimeter";
@@ -486,36 +622,56 @@ public class GateOpeningManager extends Service implements LocationListener {
             currentRadius = "Outside base";
             changeNotification(Constants.NOTIFICATION_RUNNING_MESSAGE);
         }
-        lastKnownLocation = newLocation;
+        previousLocation = newLocation;
         for (LocationChangeListener locationChangeListener : locationChangeListeners) {
             locationChangeListener.locationChanged(currentRadius);
         }
     }
 
-    @Override
-    public void onStatusChanged(String provider, int status, Bundle extras) {
-
-    }
-
-    @Override
-    public void onProviderEnabled(String provider) {
-
-    }
-
-    @Override
-    public void onProviderDisabled(String provider) {
-
-    }
-
-
     public boolean canSendCommand() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        if (!hasLocationPermission()) {
             return false;
         }
-        lastKnownLocation = locationManager.getLastKnownLocation(LocationManager.FUSED_PROVIDER);
-        return lastKnownLocation != null && BASE_LOCATION.distanceTo(lastKnownLocation) < Constants.MAX_ALLOWED_DISTANCE;
+        return cachedLocation != null && BASE_LOCATION.distanceTo(cachedLocation) < Constants.MAX_ALLOWED_DISTANCE;
     }
 
+
+    /**
+     * Registers a single home geofence (radius = small perimeter) as a backup trigger that
+     * fires even when the app is backgrounded or was killed. Best-effort — logs on failure.
+     */
+    private void registerHomeGeofence() {
+        if (!hasLocationPermission()) {
+            return;
+        }
+        Geofence geofence = new Geofence.Builder()
+                .setRequestId(HOME_GEOFENCE_ID)
+                .setCircularRegion(Secret.BASE_LAT, Secret.BASE_LON, Constants.BASE_OPEN_DISTANCE_SMALL)
+                .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER | Geofence.GEOFENCE_TRANSITION_EXIT)
+                .build();
+        GeofencingRequest req = new GeofencingRequest.Builder()
+                .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER)
+                .addGeofence(geofence)
+                .build();
+        try {
+            geofencingClient.addGeofences(req, getGeofencePendingIntent())
+                    .addOnFailureListener(e -> Log.e(TAG, "Failed to add geofence", e));
+        } catch (SecurityException e) {
+            Log.e(TAG, "Missing permission for geofence", e);
+        }
+    }
+
+    private PendingIntent getGeofencePendingIntent() {
+        if (geofencePendingIntent != null) {
+            return geofencePendingIntent;
+        }
+        Intent intent = new Intent(this, GeofenceBroadcastReceiver.class);
+        // FLAG_MUTABLE is required on API 31+ so the system can inject the transition extras.
+        geofencePendingIntent = PendingIntent.getBroadcast(this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
+        return geofencePendingIntent;
+    }
 
     public class RunServiceBinder extends Binder {
         GateOpeningManager getService() {
